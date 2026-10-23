@@ -1,3 +1,6 @@
+import os
+from datetime import datetime
+
 import torch
 import torch.nn as nn
 
@@ -44,13 +47,30 @@ def main():
                                             T_warmup=30 * len(train_loader),
                                             eta_min=5e-5)
 
+    # Keep checkpoints and TensorBoard logs isolated for each run.
+    run_name = f'{datetime.now():%Y%m%d_%H%M}_cr{args.cr}'
+    result_dir = os.path.join('result', run_name)
+    checkpoint_dir = os.path.join(result_dir, 'checkpoints')
+    tensorboard_dir = os.path.join(result_dir, 'tensorboard')
+    run_config = {
+        'data_dir': os.path.abspath(args.data_dir),
+        'scenario': args.scenario,
+        'cr': args.cr,
+        'batch_size': args.batch_size,
+        'workers': args.workers,
+        'seed': args.seed
+    }
+
     # Define the training pipeline
     trainer = Trainer(model=model,
                       device=device,
                       optimizer=optimizer,
                       criterion=criterion,
                       scheduler=scheduler,
-                      resume=args.resume)
+                      resume=args.resume,
+                      save_path=checkpoint_dir,
+                      tensorboard_path=tensorboard_dir,
+                      run_config=run_config)
 
     # Start training
     trainer.loop(args.epochs, train_loader, val_loader, test_loader)

@@ -2,6 +2,8 @@ import time
 import os
 import torch
 from collections import namedtuple
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from utils import logger
 from utils.statics import AverageMeter, evaluator
@@ -18,7 +20,8 @@ class Trainer:
     """
 
     def __init__(self, model, device, optimizer, criterion, scheduler, resume=None,
-                 save_path='./checkpoints', print_freq=20, val_freq=10, test_freq=10):
+                 save_path='./checkpoints', tensorboard_path=None,
+                 run_config=None, print_freq=20, val_freq=10, test_freq=10):
 
         # Basic arguments
         self.model = model
@@ -30,6 +33,7 @@ class Trainer:
         # Verbose arguments
         self.resume_file = resume
         self.save_path = save_path
+        self.run_config = dict(run_config or {})
         self.print_freq = print_freq
         self.val_freq = val_freq
         self.test_freq = test_freq
@@ -42,9 +46,14 @@ class Trainer:
         self.test_loss = None
         self.best_rho = Result()
         self.best_nmse = Result()
+        self.best_val_loss = float('inf')
+        self.best_val_epoch = None
 
         self.tester = Tester(model, device, criterion, print_freq)
         self.test_loader = None
+        if tensorboard_path is None:
+            tensorboard_path = os.path.join(save_path or '.', 'tensorboard')
+        self.writer = SummaryWriter(log_dir=tensorboard_path)
 
     def loop(self, epochs, train_loader, val_loader, test_loader):
         r""" The main loop function which runs training and validation iteratively.
@@ -59,21 +68,37 @@ class Trainer:
         self.all_epoch = epochs
         self._resume()
 
-        for ep in range(self.cur_epoch, epochs + 1):
-            self.cur_epoch = ep
+        try:
+            for ep in range(self.cur_epoch, epochs + 1):
+                self.cur_epoch = ep
 
-            # conduct training, validation and test
-            self.train_loss = self.train(train_loader)
-            if ep % self.val_freq == 0:
+                # conduct training, validation and test
+                self.train_loss = self.train(train_loader)
                 self.val_loss = self.val(val_loader)
 
-            if ep % self.test_freq == 0:
-                self.test_loss, rho, nmse = self.test(test_loader)
-            else:
-                rho, nmse = None, None
+                is_best_val = self.val_loss < self.best_val_loss
+                if is_best_val:
+                    self.best_val_loss = self.val_loss
+                    self.best_val_epoch = ep
 
-            # conduct saving, visualization and log printing
-            self._loop_postprocessing(rho, nmse)
+                self.writer.add_scalar('Loss/train', self.train_loss, ep)
+                self.writer.add_scalar('Loss/val', self.val_loss, ep)
+                self.writer.flush()
+
+                best_mark = ' *' if is_best_val else ''
+                print(f'Epoch [{ep}/{epochs}]  '
+                      f'Train Loss: {self.train_loss:.8f} | '
+                      f'Val Loss: {self.val_loss:.8f}{best_mark}', flush=True)
+
+                if ep % self.test_freq == 0:
+                    self.test_loss, rho, nmse = self.test(test_loader)
+                else:
+                    rho, nmse = None, None
+
+                # conduct saving and checkpoint updates
+                self._loop_postprocessing(rho, nmse)
+        finally:
+            self.writer.close()
 
     def train(self, train_loader):
         r""" train the model on the given data loader for one epoch.
@@ -84,7 +109,7 @@ class Trainer:
 
         self.model.train()
         with torch.enable_grad():
-            return self._iteration(train_loader)
+            return self._iteration(train_loader, show_progress=True)
 
     def val(self, val_loader):
         r""" exam the model with validation set.
@@ -95,7 +120,7 @@ class Trainer:
 
         self.model.eval()
         with torch.no_grad():
-            return self._iteration(val_loader)
+            return self._iteration(val_loader, show_progress=False)
 
     def test(self, test_loader):
         r""" Truly test the model on the test dataset for one epoch.
@@ -108,12 +133,22 @@ class Trainer:
         with torch.no_grad():
             return self.tester(test_loader, verbose=False)
 
-    def _iteration(self, data_loader):
+    def _iteration(self, data_loader, show_progress=False):
         iter_loss = AverageMeter('Iter loss')
-        iter_time = AverageMeter('Iter time')
-        time_tmp = time.time()
+        data_iterator = data_loader
+        if show_progress:
+            data_iterator = tqdm(
+                data_loader,
+                total=len(data_loader),
+                desc=f'Epoch [{self.cur_epoch}/{self.all_epoch}] Train',
+                unit='batch',
+                leave=True,
+                dynamic_ncols=True,
+                ascii=False,
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} '
+                           '[{elapsed}<{remaining}, {rate_fmt}]')
 
-        for batch_idx, (sparse_gt, ) in enumerate(data_loader):
+        for sparse_gt, in data_iterator:
             sparse_gt = sparse_gt.to(self.device)
             sparse_pred = self.model(sparse_gt)
             loss = self.criterion(sparse_pred, sparse_gt)
@@ -125,21 +160,7 @@ class Trainer:
                 self.optimizer.step()
                 self.scheduler.step()
 
-            # Log and visdom update
-            iter_loss.update(loss)
-            iter_time.update(time.time() - time_tmp)
-            time_tmp = time.time()
-
-            # plot progress
-            if (batch_idx + 1) % self.print_freq == 0:
-                logger.info(f'Epoch: [{self.cur_epoch}/{self.all_epoch}]'
-                            f'[{batch_idx + 1}/{len(data_loader)}] '
-                            f'lr: {self.scheduler.get_lr()[0]:.2e} | '
-                            f'MSE loss: {iter_loss.avg:.3e} | '
-                            f'time: {iter_time.avg:.3f}')
-
-        mode = 'Train' if self.model.training else 'Val'
-        logger.info(f'=> {mode}  Loss: {iter_loss.avg:.3e}\n')
+            iter_loss.update(loss.item())
 
         return iter_loss.avg
 
@@ -166,6 +187,8 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint['scheduler'])
         self.best_rho = checkpoint['best_rho']
         self.best_nmse = checkpoint['best_nmse']
+        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        self.best_val_epoch = checkpoint.get('best_val_epoch')
         self.cur_epoch += 1  # start from the next epoch
 
         logger.info(f'=> successfully loaded checkpoint {self.resume_file} '
@@ -181,8 +204,11 @@ class Trainer:
             'state_dict': self.model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'scheduler': self.scheduler.state_dict(),
+            'config': self.run_config,
             'best_rho': self.best_rho,
-            'best_nmse': self.best_nmse
+            'best_nmse': self.best_nmse,
+            'best_val_loss': self.best_val_loss,
+            'best_val_epoch': self.best_val_epoch
         }
 
         # save model with best rho and nmse
@@ -197,16 +223,6 @@ class Trainer:
                 self._save(state, name=f"best_nmse.pth")
 
         self._save(state, name='last.pth')
-
-        # print current best results
-        if self.best_rho.rho is not None:
-            print(f'\n=! Best rho: {self.best_rho.rho:.3e} ('
-                  f'Corresponding nmse={self.best_rho.nmse:.3e}; '
-                  f'epoch={self.best_rho.epoch})'
-                  f'\n   Best NMSE: {self.best_nmse.nmse:.3e} ('
-                  f'Corresponding rho={self.best_nmse.rho:.3e};  '
-                  f'epoch={self.best_nmse.epoch})\n')
-
 
 class Tester:
     r""" The testing interface for classification
@@ -227,13 +243,13 @@ class Tester:
 
         self.model.eval()
         with torch.no_grad():
-            loss, rho, nmse = self._iteration(test_data)
+            loss, rho, nmse = self._iteration(test_data, verbose=verbose)
         if verbose:
             print(f'\n=> Test result: \nloss: {loss:.3e}'
                   f'    rho: {rho:.3e}    NMSE: {nmse:.3e}\n')
         return loss, rho, nmse
 
-    def _iteration(self, data_loader):
+    def _iteration(self, data_loader, verbose=True):
         r""" protected function which test the model on given data loader for one epoch.
         """
 
@@ -257,11 +273,12 @@ class Tester:
             time_tmp = time.time()
 
             # plot progress
-            if (batch_idx + 1) % self.print_freq == 0:
+            if verbose and (batch_idx + 1) % self.print_freq == 0:
                 logger.info(f'[{batch_idx + 1}/{len(data_loader)}] '
                             f'loss: {iter_loss.avg:.3e} | rho: {iter_rho.avg:.3e} | '
                             f'NMSE: {iter_nmse.avg:.3e} | time: {iter_time.avg:.3f}')
 
-        logger.info(f'=> Test rho:{iter_rho.avg:.3e}  NMSE: {iter_nmse.avg:.3e}\n')
+        if verbose:
+            logger.info(f'=> Test rho:{iter_rho.avg:.3e}  NMSE: {iter_nmse.avg:.3e}\n')
 
         return iter_loss.avg, iter_rho.avg, iter_nmse.avg
