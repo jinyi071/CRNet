@@ -1,35 +1,46 @@
 import os
 import random
+import numpy as np
 import thop
 import torch
 
 from models import crnet
 from utils import logger, line_seg
 
-__all__ = ["init_device", "init_model"]
+__all__ = ["seed_everything", "init_device", "init_model"]
 
 
-def init_device(seed=None, cpu=None, gpu=None, affinity=None):
+def seed_everything(seed=92304):
+    if seed is None:
+        seed = 92304
+
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    logger.info(f'=> Random seed: {seed}')
+
+
+def init_device(seed=92304, cpu=None, gpu=None, affinity=None):
     # set the CPU affinity
     if affinity is not None:
         os.system(f'taskset -p {affinity} {os.getpid()}')
-
-    # Set the random seed
-    if seed is not None:
-        random.seed(seed)
-        torch.manual_seed(seed)
-        torch.backends.cudnn.deterministic = True
 
     # Set the GPU id you choose
     if gpu is not None:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
 
+    seed_everything(seed)
+
     # Env setup
     if not cpu and torch.cuda.is_available():
         device = torch.device('cuda')
-        torch.backends.cudnn.benchmark = True
-        if seed is not None:
-            torch.cuda.manual_seed(seed)
         pin_memory = True
         logger.info("Running on GPU%d" % (gpu if gpu else 0))
     else:

@@ -24,8 +24,8 @@ parser.add_argument('--pretrained', type=str, default=None,
                     help='using locally pre-trained model. The path of pre-trained model should be given')
 parser.add_argument('--resume', type=str, metavar='PATH', default=None,
                     help='path to latest checkpoint (default: none)')
-parser.add_argument('--seed', default=None, type=int,
-                    help='seed for initializing training. ')
+parser.add_argument('--seed', default=92304, type=int,
+                    help='seed for reproducible training (default: 92304)')
 parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
 parser.add_argument('--cpu', action='store_true',
