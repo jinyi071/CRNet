@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from dataset import PreFetcher
+from dataset.cost2100 import PreFetcher
 from utils import Tester, init_device, init_model, logger
 
 
