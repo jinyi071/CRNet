@@ -159,7 +159,7 @@ class Trainer:
             return None
         assert os.path.isfile(self.resume_file)
         logger.info(f'=> loading checkpoint {self.resume_file}')
-        checkpoint = torch.load(self.resume_file)
+        checkpoint = torch.load(self.resume_file, weights_only=False)
         self.cur_epoch = checkpoint['epoch']
         self.model.load_state_dict(checkpoint['state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
